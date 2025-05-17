@@ -395,12 +395,21 @@ where
   plugin::Builder::new("graphql")
     .invoke_handler(invoke_handler(schema.clone()))
     .setup(move |_| {
-      let graphql_post = async_graphql_warp::graphql(schema).and_then(
-        |(schema, request): (
-          Schema<Query, Mutation, Subscription>,
-          async_graphql::Request,
-        )| async move {
-          Ok::<_, Infallible>(GraphQLResponse::from(schema.execute(request).await))
+      let graphql_post = warp::path("graphql").and(
+        async_graphql_warp::graphql(schema.clone()).and_then(
+          |(schema, request): (
+            Schema<Query, Mutation, Subscription>,
+            async_graphql::Request,
+          )| async move {
+            Ok::<_, Infallible>(GraphQLResponse::from(schema.execute(request).await))
+          },
+        ),
+      );
+
+      let graphql_subscription = warp::path("subscriptions").and(warp::ws()).map(
+        move |ws: warp::ws::Ws| {
+          let schema = schema.clone();
+          ws.on_upgrade(move |socket| async_graphql_warp::graphql_subscription(socket, schema))
         },
       );
 
@@ -409,13 +418,15 @@ where
           .header("content-type", "text/html")
           .body(
             GraphiQLSource::build()
-              .endpoint(&graphiql_addr.to_string())
+              .endpoint(&format!("http://{}/graphql", graphiql_addr))
+              .subscription_endpoint(&format!("ws://{}/subscriptions", graphiql_addr))
               .finish(),
           )
       });
 
       let routes = graphiql
         .or(graphql_post)
+        .or(graphql_subscription)
         .recover(|err: Rejection| async move {
           if let Some(GraphQLBadRequest(err)) = err.find() {
             return Ok::<_, Infallible>(warp::reply::with_status(
